@@ -1,0 +1,80 @@
+@startuml
+title Diagramme de classes UML : Système de réservation de vols
+
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam linetype ortho
+skinparam class {
+    BackgroundColor #FFFFFF
+    BorderColor #534AB7
+    HeaderBackgroundColor #EEEDFE
+    ArrowColor #5F5E5A
+}
+
+class Agence {
+    - nomAgence : String
+    - adresse : String
+    - telephone : String
+    + gererVols()
+    + validerReservation()
+}
+
+class Vol {
+    - numVol : String
+    - villeDepart : String
+    - villeArrivee : String
+    - dateDepart : Date
+    - heureDepart : Time
+    - placesDisponibles : int
+    + rechercherVol()
+}
+
+class Avion {
+    - immatriculation : String
+    - modele : String
+    - marque : String
+    - capacite : int
+    - nombrePlaces : int
+    + verifierDisponibilite()
+}
+
+class Reservation {
+    - idReservation : int
+    - dateReservation : Date
+    - nombrePlaces : int
+    - statut : Statut
+    + creerReservation()
+    + annulerReservation()
+}
+
+class Billet {
+    - numBillet : String
+    - prixFinal : double
+    - siege : String
+    + genererBillet()
+}
+
+class Passager {
+    - nom : String
+    - prenom : String
+    - numPasseport : String
+    - dateNaissance : Date
+    + enregistrer()
+    + embarquer()
+}
+
+enum Statut {
+    EN_ATTENTE
+    CONFIRMEE
+    ANNULEE
+}
+
+Agence "1" -- "*" Vol : gère
+Vol "*" -- "1" Avion : utilise
+Vol "1" -- "*" Reservation : reçoit
+Reservation "*" -- "1" Passager : pour
+Reservation "1" -- "*" Billet : génère
+Passager "1" -- "*" Billet : détient
+Reservation ..> Statut
+
+@enduml
