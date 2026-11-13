@@ -1,0 +1,376 @@
+// Systeme de reservation de vols - C++17, fichier unique
+// Compilation : g++ -std=c++17 -Wall -Wextra main.cpp -o reservation
+// Execution   : ./reservation   (Windows : reservation.exe)
+
+#include <algorithm>
+#include <iostream>
+#include <memory>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+// ===================== Types utilitaires =====================
+enum class Statut { EnAttente, Confirmee, Annulee };
+
+inline std::string enTexte(Statut s) {
+    switch (s) {
+        case Statut::EnAttente: return "EN_ATTENTE";
+        case Statut::Confirmee: return "CONFIRMEE";
+        case Statut::Annulee:   return "ANNULEE";
+    }
+    return "INCONNU";
+}
+
+class ReservationException : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+// ===================== Avion =====================
+class Avion {
+public:
+    Avion(std::string immatriculation, std::string modele, std::string marque,
+          int capacite, int nombrePlaces)
+        : immatriculation_(std::move(immatriculation)), modele_(std::move(modele)),
+          marque_(std::move(marque)), capacite_(capacite), nombrePlaces_(nombrePlaces) {
+        if (immatriculation_.empty()) throw std::invalid_argument("Avion : immatriculation vide");
+        if (nombrePlaces_ <= 0 || nombrePlaces_ > capacite_)
+            throw std::invalid_argument("Avion : nombre de places incoherent");
+    }
+
+    const std::string& getImmatriculation() const { return immatriculation_; }
+    const std::string& getModele() const { return modele_; }
+    const std::string& getMarque() const { return marque_; }
+    int getCapacite() const { return capacite_; }
+    int getNombrePlaces() const { return nombrePlaces_; }
+
+    // Un avion peut assurer plusieurs vols, mais pas deux au meme creneau.
+    bool verifierDisponibilite(const std::string& date, const std::string& heure) const {
+        return creneaux_.count(date + " " + heure) == 0;
+    }
+    void occuperCreneau(const std::string& date, const std::string& heure) {
+        creneaux_.insert(date + " " + heure);
+    }
+
+private:
+    std::string immatriculation_, modele_, marque_;
+    int capacite_, nombrePlaces_;
+    std::set<std::string> creneaux_;
+};
+
+// ===================== Passager =====================
+class Billet;
+
+class Passager {
+public:
+    Passager(std::string nom, std::string prenom, std::string numPasseport,
+             std::string dateNaissance)
+        : nom_(std::move(nom)), prenom_(std::move(prenom)),
+          numPasseport_(std::move(numPasseport)), dateNaissance_(std::move(dateNaissance)) {
+        if (nom_.empty() || prenom_.empty() || numPasseport_.empty())
+            throw std::invalid_argument("Passager : nom, prenom et passeport obligatoires");
+    }
+
+    const std::string& getNom() const { return nom_; }
+    const std::string& getPrenom() const { return prenom_; }
+    const std::string& getNumPasseport() const { return numPasseport_; }
+    const std::string& getDateNaissance() const { return dateNaissance_; }
+    std::string nomComplet() const { return prenom_ + " " + nom_; }
+
+    void enregistrer() { enregistre_ = true; }
+    bool estEnregistre() const { return enregistre_; }
+    void embarquer(Billet& billet) const;  // defini apres Billet
+
+private:
+    std::string nom_, prenom_, numPasseport_, dateNaissance_;
+    bool enregistre_ = false;
+};
+
+// ===================== Billet =====================
+class Billet {
+public:
+    // Seul moyen de creer un billet (constructeur prive).
+    static std::unique_ptr<Billet> genererBillet(std::string numBillet,
+                                                 std::shared_ptr<Passager> passager,
+                                                 std::string siege, double prixFinal) {
+        return std::unique_ptr<Billet>(
+            new Billet(std::move(numBillet), std::move(passager), std::move(siege), prixFinal));
+    }
+
+    const std::string& getNumBillet() const { return numBillet_; }
+    double getPrixFinal() const { return prixFinal_; }
+    const std::string& getSiege() const { return siege_; }
+    const Passager& getPassager() const { return *passager_; }
+    bool estUtilise() const { return utilise_; }
+
+    std::string toString() const {
+        return "Billet " + numBillet_ + " | " + passager_->nomComplet() + " | siege " + siege_ +
+               " | " + std::to_string(static_cast<long long>(prixFinal_)) + " FCFA" +
+               (utilise_ ? " | utilise" : "");
+    }
+
+private:
+    friend class Passager;  // seul le passager valide l'embarquement
+    Billet(std::string numBillet, std::shared_ptr<Passager> passager, std::string siege,
+           double prixFinal)
+        : numBillet_(std::move(numBillet)), prixFinal_(prixFinal), siege_(std::move(siege)),
+          passager_(std::move(passager)) {
+        if (!passager_) throw std::invalid_argument("Billet : passager nul");
+        if (prixFinal_ < 0) throw std::invalid_argument("Billet : prix negatif");
+    }
+
+    std::string numBillet_;
+    double prixFinal_;
+    std::string siege_;
+    std::shared_ptr<Passager> passager_;
+    bool utilise_ = false;
+};
+
+inline void Passager::embarquer(Billet& billet) const {
+    if (!enregistre_) throw ReservationException("Embarquement refuse : passager non enregistre");
+    if (&billet.getPassager() != this)
+        throw ReservationException("Embarquement refuse : ce billet n'est pas le sien");
+    if (billet.estUtilise()) throw ReservationException("Embarquement refuse : billet deja utilise");
+    billet.utilise_ = true;
+}
+
+// ===================== Reservation (declaration) =====================
+class Vol;
+
+class Reservation {
+public:
+    // Verifie et decompte les places du vol avant de creer la reservation.
+    static std::unique_ptr<Reservation> creerReservation(Vol& vol,
+                                                         std::shared_ptr<Passager> passager,
+                                                         int nombrePlaces,
+                                                         std::string dateReservation,
+                                                         std::string idReservation);
+    void annulerReservation();
+
+    const std::string& getIdReservation() const { return id_; }
+    const std::string& getDateReservation() const { return date_; }
+    int getNombrePlaces() const { return nombrePlaces_; }
+    Statut getStatut() const { return statut_; }
+    const Vol& getVol() const { return vol_; }
+    const std::vector<std::unique_ptr<Billet>>& getBillets() const { return billets_; }
+    std::string toString() const;
+
+private:
+    friend class Agence;  // seule l'agence confirme une reservation
+    Reservation(std::string id, std::string date, int nombrePlaces,
+                std::shared_ptr<Passager> passager, Vol& vol)
+        : id_(std::move(id)), date_(std::move(date)), nombrePlaces_(nombrePlaces),
+          passager_(std::move(passager)), vol_(vol) {}
+    void confirmer(double prixUnitaire);
+
+    std::string id_, date_;
+    int nombrePlaces_;
+    Statut statut_ = Statut::EnAttente;
+    std::shared_ptr<Passager> passager_;
+    Vol& vol_;                                      // reference non proprietaire
+    std::vector<std::unique_ptr<Billet>> billets_;  // composition
+};
+
+// ===================== Vol =====================
+class Vol {
+public:
+    Vol(std::string numVol, std::string villeDepart, std::string villeArrivee,
+        std::string dateDepart, std::string heureDepart, std::shared_ptr<Avion> avion)
+        : numVol_(std::move(numVol)), villeDepart_(std::move(villeDepart)),
+          villeArrivee_(std::move(villeArrivee)), dateDepart_(std::move(dateDepart)),
+          heureDepart_(std::move(heureDepart)), avion_(std::move(avion)) {
+        if (numVol_.empty()) throw std::invalid_argument("Vol : numero vide");
+        if (villeDepart_ == villeArrivee_) throw std::invalid_argument("Vol : villes identiques");
+        if (!avion_) throw std::invalid_argument("Vol : avion nul");
+        if (!avion_->verifierDisponibilite(dateDepart_, heureDepart_))
+            throw ReservationException("Avion indisponible a cette date et heure");
+        avion_->occuperCreneau(dateDepart_, heureDepart_);
+        placesDisponibles_ = avion_->getNombrePlaces();
+    }
+    Vol(const Vol&) = delete;
+    Vol& operator=(const Vol&) = delete;
+
+    const std::string& getNumVol() const { return numVol_; }
+    const std::string& getVilleDepart() const { return villeDepart_; }
+    const std::string& getVilleArrivee() const { return villeArrivee_; }
+    const std::string& getDateDepart() const { return dateDepart_; }
+    const std::string& getHeureDepart() const { return heureDepart_; }
+    int getPlacesDisponibles() const { return placesDisponibles_; }
+
+    // Criteres vides = ignores ; le vol doit avoir au moins une place libre.
+    bool rechercherVol(const std::string& depart, const std::string& arrivee,
+                       const std::string& date) const {
+        return (depart.empty() || depart == villeDepart_) &&
+               (arrivee.empty() || arrivee == villeArrivee_) &&
+               (date.empty() || date == dateDepart_) && placesDisponibles_ > 0;
+    }
+
+    Reservation& reserver(std::shared_ptr<Passager> passager, int nombrePlaces,
+                          const std::string& dateReservation) {
+        std::string id = "RES-" + numVol_ + "-" + std::to_string(++compteurReservations_);
+        reservations_.push_back(Reservation::creerReservation(
+            *this, std::move(passager), nombrePlaces, dateReservation, std::move(id)));
+        return *reservations_.back();
+    }
+
+    std::string toString() const {
+        return "Vol " + numVol_ + " : " + villeDepart_ + " -> " + villeArrivee_ + " | " +
+               dateDepart_ + " " + heureDepart_ + " | " + std::to_string(placesDisponibles_) +
+               " place(s) libre(s)";
+    }
+
+private:
+    friend class Reservation;  // la reservation gere le decompte des places
+    void consommerPlaces(int n) { placesDisponibles_ -= n; }
+    void libererPlaces(int n) {
+        placesDisponibles_ = std::min(placesDisponibles_ + n, avion_->getNombrePlaces());
+    }
+    std::string attribuerSiege() { return "S" + std::to_string(++compteurSieges_); }
+
+    std::string numVol_, villeDepart_, villeArrivee_, dateDepart_, heureDepart_;
+    int placesDisponibles_ = 0;
+    int compteurSieges_ = 0;
+    int compteurReservations_ = 0;
+    std::shared_ptr<Avion> avion_;                            // association
+    std::vector<std::unique_ptr<Reservation>> reservations_;  // composition
+};
+
+// ===================== Reservation (implementation) =====================
+inline std::unique_ptr<Reservation> Reservation::creerReservation(
+    Vol& vol, std::shared_ptr<Passager> passager, int nombrePlaces,
+    std::string dateReservation, std::string idReservation) {
+    if (!passager) throw std::invalid_argument("Reservation : passager nul");
+    if (nombrePlaces <= 0) throw std::invalid_argument("Reservation : nombre de places invalide");
+    if (vol.getPlacesDisponibles() < nombrePlaces)
+        throw ReservationException("Plus assez de places sur le vol " + vol.getNumVol());
+    vol.consommerPlaces(nombrePlaces);
+    return std::unique_ptr<Reservation>(new Reservation(
+        std::move(idReservation), std::move(dateReservation), nombrePlaces,
+        std::move(passager), vol));
+}
+
+inline void Reservation::confirmer(double prixUnitaire) {
+    if (statut_ != Statut::EnAttente)
+        throw ReservationException("Seule une reservation en attente peut etre confirmee");
+    for (int i = 0; i < nombrePlaces_; ++i)
+        billets_.push_back(Billet::genererBillet("BIL-" + id_ + "-" + std::to_string(i + 1),
+                                                 passager_, vol_.attribuerSiege(), prixUnitaire));
+    statut_ = Statut::Confirmee;
+}
+
+inline void Reservation::annulerReservation() {
+    if (statut_ == Statut::Annulee) throw ReservationException("Reservation deja annulee");
+    for (const auto& b : billets_)
+        if (b->estUtilise())
+            throw ReservationException("Annulation impossible : un billet est deja utilise");
+    billets_.clear();
+    vol_.libererPlaces(nombrePlaces_);
+    statut_ = Statut::Annulee;
+}
+
+inline std::string Reservation::toString() const {
+    return "Reservation " + id_ + " | " + passager_->nomComplet() + " | " +
+           std::to_string(nombrePlaces_) + " place(s) | " + enTexte(statut_);
+}
+
+// ===================== Agence =====================
+class Agence {
+public:
+    Agence(std::string nomAgence, std::string adresse, std::string telephone)
+        : nomAgence_(std::move(nomAgence)), adresse_(std::move(adresse)),
+          telephone_(std::move(telephone)) {
+        if (nomAgence_.empty()) throw std::invalid_argument("Agence : nom vide");
+    }
+
+    const std::string& getNomAgence() const { return nomAgence_; }
+    const std::string& getAdresse() const { return adresse_; }
+    const std::string& getTelephone() const { return telephone_; }
+
+    // Consulter / gerer les vols
+    void ajouterVol(std::shared_ptr<Vol> vol) {
+        if (!vol) throw std::invalid_argument("Agence : vol nul");
+        if (gereLeVol(*vol)) throw ReservationException("Vol deja gere : " + vol->getNumVol());
+        vols_.push_back(std::move(vol));
+    }
+    void retirerVol(const std::string& numVol) {
+        auto it = std::remove_if(vols_.begin(), vols_.end(),
+            [&](const std::shared_ptr<Vol>& v) { return v->getNumVol() == numVol; });
+        if (it == vols_.end()) throw ReservationException("Vol introuvable : " + numVol);
+        vols_.erase(it, vols_.end());
+    }
+    const std::vector<std::shared_ptr<Vol>>& consulterVols() const { return vols_; }
+
+    std::vector<std::shared_ptr<Vol>> rechercherVols(const std::string& depart,
+                                                     const std::string& arrivee,
+                                                     const std::string& date) const {
+        std::vector<std::shared_ptr<Vol>> resultat;
+        for (const auto& v : vols_)
+            if (v->rechercherVol(depart, arrivee, date)) resultat.push_back(v);
+        return resultat;
+    }
+
+    // Valide une reservation en attente et genere les billets.
+    void validerReservation(Reservation& reservation, double tarifUnitaire) {
+        if (tarifUnitaire < 0) throw std::invalid_argument("Agence : tarif negatif");
+        if (!gereLeVol(reservation.getVol()))
+            throw ReservationException("Cette agence ne gere pas le vol de la reservation");
+        reservation.confirmer(tarifUnitaire);
+    }
+
+private:
+    bool gereLeVol(const Vol& vol) const {
+        return std::any_of(vols_.begin(), vols_.end(),
+            [&](const std::shared_ptr<Vol>& v) { return v.get() == &vol; });
+    }
+
+    std::string nomAgence_, adresse_, telephone_;
+    std::vector<std::shared_ptr<Vol>> vols_;
+};
+
+// ===================== Programme principal =====================
+int main() {
+    try {
+        Agence agence("Benin Voyages", "Natitingou, Atakora", "+229 00 00 00 00");
+        auto avion = std::make_shared<Avion>("TY-BJA", "A320", "Airbus", 180, 4);
+        auto vol = std::make_shared<Vol>("BJ101", "Cotonou", "Paris", "10/12/2026", "08:30", avion);
+        agence.ajouterVol(vol);
+
+        auto awa   = std::make_shared<Passager>("Adjovi", "Awa", "P1234567", "02/03/1995");
+        auto koffi = std::make_shared<Passager>("Kossou", "Koffi", "P7654321", "15/08/1990");
+        awa->enregistrer();
+
+        std::cout << "== Recherche ==\n";
+        for (const auto& v : agence.rechercherVols("Cotonou", "Paris", "10/12/2026"))
+            std::cout << v->toString() << '\n';
+
+        std::cout << "\n== Reservation et validation ==\n";
+        Reservation& r1 = vol->reserver(awa, 2, "13/11/2026");
+        std::cout << r1.toString() << '\n';
+        agence.validerReservation(r1, 450000.0);
+        std::cout << r1.toString() << '\n';
+        for (const auto& b : r1.getBillets()) std::cout << "  " << b->toString() << '\n';
+
+        std::cout << "\n== Embarquement ==\n";
+        awa->embarquer(*r1.getBillets().front());
+        std::cout << r1.getBillets().front()->toString() << '\n';
+
+        std::cout << "\n== Annulation ==\n";
+        Reservation& r2 = vol->reserver(koffi, 2, "13/11/2026");
+        std::cout << vol->toString() << '\n';
+        r2.annulerReservation();
+        std::cout << r2.toString() << '\n' << vol->toString() << '\n';
+
+        std::cout << "\n== Regles metier (erreurs attendues) ==\n";
+        try { vol->reserver(koffi, 3, "13/11/2026"); }
+        catch (const ReservationException& e) { std::cout << "Erreur : " << e.what() << '\n'; }
+        try { koffi->embarquer(*r1.getBillets().back()); }
+        catch (const ReservationException& e) { std::cout << "Erreur : " << e.what() << '\n'; }
+        try { r1.annulerReservation(); }
+        catch (const ReservationException& e) { std::cout << "Erreur : " << e.what() << '\n'; }
+    } catch (const std::exception& e) {
+        std::cerr << "Erreur fatale : " << e.what() << '\n';
+        return 1;
+    }
+    return 0;
+}
